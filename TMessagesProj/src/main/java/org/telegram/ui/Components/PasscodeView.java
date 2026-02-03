@@ -73,10 +73,13 @@ import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.LaunchActivity;
 import org.telegram.ui.Stories.recorder.KeyboardNotifier;
 
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.Executor;
 
 public class PasscodeView extends FrameLayout implements NotificationCenter.NotificationCenterDelegate {
@@ -452,6 +455,20 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
     private ArrayList<TextView> numberTextViews;
     private ArrayList<TextView> lettersTextViews;
     private ArrayList<FrameLayout> numberFrameLayouts;
+    private FrameLayout calculatorFrameLayout;
+    private FrameLayout calculatorDisplayContainer;
+    private TextView calculatorDisplay;
+    private TextView calculatorMemoryIndicator;
+    private final ArrayList<CalculatorButton> calculatorButtons = new ArrayList<>();
+    private boolean calculatorMode;
+    private String calculatorInput = "0";
+    private Double calculatorStoredValue;
+    private String calculatorPendingOp;
+    private boolean calculatorInputInProgress;
+    private double calculatorMemoryValue;
+    private boolean calculatorHasMemory;
+    private final StringBuilder calculatorPasscodeBuffer = new StringBuilder(4);
+    private final DecimalFormat calculatorFormat = new DecimalFormat("0.##########", DecimalFormatSymbols.getInstance(Locale.US));
     private FrameLayout passwordFrameLayout;
     private ImageView eraseView;
     private PasscodeButton fingerprintView;
@@ -725,6 +742,47 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
         };
         numbersContainer.addView(numbersFrameLayout, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER));
 
+        calculatorFrameLayout = new FrameLayout(context);
+        calculatorFrameLayout.setVisibility(GONE);
+        numbersContainer.addView(calculatorFrameLayout, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER));
+
+        calculatorDisplayContainer = new FrameLayout(context);
+        calculatorDisplayContainer.setBackground(Theme.createRoundRectDrawable(dp(12), 0x26ffffff));
+        calculatorFrameLayout.addView(calculatorDisplayContainer, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, dp(70), Gravity.TOP | Gravity.LEFT));
+
+        calculatorMemoryIndicator = new TextView(context);
+        calculatorMemoryIndicator.setText("M");
+        calculatorMemoryIndicator.setTextColor(0x80ffffff);
+        calculatorMemoryIndicator.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12);
+        calculatorMemoryIndicator.setTypeface(AndroidUtilities.bold());
+        calculatorMemoryIndicator.setVisibility(INVISIBLE);
+        calculatorDisplayContainer.addView(calculatorMemoryIndicator, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.START | Gravity.TOP, 12, 8, 0, 0));
+
+        calculatorDisplay = new TextView(context);
+        calculatorDisplay.setTextColor(0xffffffff);
+        calculatorDisplay.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 32);
+        calculatorDisplay.setTypeface(AndroidUtilities.bold());
+        calculatorDisplay.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        calculatorDisplay.setText(calculatorInput);
+        calculatorDisplayContainer.addView(calculatorDisplay, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.FILL, 12, 6, 12, 6));
+
+        String[] calculatorLabels = {
+                "MC", "MR", "M+", "M-",
+                "7", "8", "9", "÷",
+                "4", "5", "6", "×",
+                "1", "2", "3", "-",
+                "0", ".", "=", "+"
+        };
+        for (String label : calculatorLabels) {
+            CalculatorButton button = new CalculatorButton(context);
+            button.setText(label);
+            button.setTag(label);
+            button.setContentDescription(label);
+            button.setOnClickListener(v -> onCalculatorButtonPressed((String) v.getTag()));
+            calculatorFrameLayout.addView(button, LayoutHelper.createFrame(BUTTON_SIZE, BUTTON_SIZE, Gravity.TOP | Gravity.LEFT));
+            calculatorButtons.add(button);
+        }
+
         numbersTitleContainer = new FrameLayout(context);
         numbersFrameLayout.addView(numbersTitleContainer, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
 
@@ -934,16 +992,26 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
     }
 
     private void processDone(boolean fingerprint) {
+        String password = "";
         if (!fingerprint) {
             if (SharedConfig.passcodeRetryInMs > 0) {
                 return;
             }
-            String password = "";
             if (SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PIN) {
                 password = passwordEditText2.getString();
             } else if (SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PASSWORD) {
                 password = passwordEditText.getText().toString();
             }
+        }
+        handlePasscodeCheck(password, fingerprint, false);
+    }
+
+    private void processCalculatorPasscode(String password) {
+        handlePasscodeCheck(password, false, true);
+    }
+
+    private void handlePasscodeCheck(String password, boolean fingerprint, boolean fromCalculator) {
+        if (!fingerprint) {
             if (password.length() == 0) {
                 onPasscodeError();
                 return;
@@ -953,8 +1021,12 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
                 if (SharedConfig.passcodeRetryInMs > 0) {
                     checkRetryTextView();
                 }
-                passwordEditText.setText("");
-                passwordEditText2.eraseAllCharacters(true);
+                if (fromCalculator) {
+                    resetCalculatorState();
+                } else {
+                    passwordEditText.setText("");
+                    passwordEditText2.eraseAllCharacters(true);
+                }
                 onPasscodeError();
                 if (backgroundDrawable instanceof MotionBackgroundDrawable) {
                     MotionBackgroundDrawable motionBackgroundDrawable = (MotionBackgroundDrawable) backgroundDrawable;
@@ -1011,6 +1083,197 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
         });
     }
 
+    private void resetCalculatorState() {
+        calculatorInput = "0";
+        calculatorStoredValue = null;
+        calculatorPendingOp = null;
+        calculatorInputInProgress = false;
+        calculatorPasscodeBuffer.setLength(0);
+        updateCalculatorDisplay();
+        updateCalculatorMemoryIndicator();
+    }
+
+    private void onCalculatorButtonPressed(String label) {
+        switch (label) {
+            case "C":
+                calculatorPasscodeBuffer.setLength(0);
+                resetCalculatorState();
+                return;
+            case "MC":
+                calculatorPasscodeBuffer.setLength(0);
+                calculatorMemoryValue = 0;
+                calculatorHasMemory = false;
+                updateCalculatorMemoryIndicator();
+                return;
+            case "MR":
+                calculatorPasscodeBuffer.setLength(0);
+                if (calculatorHasMemory) {
+                    calculatorInput = formatCalculatorValue(calculatorMemoryValue);
+                    calculatorInputInProgress = true;
+                    updateCalculatorDisplay();
+                }
+                return;
+            case "M+":
+                calculatorPasscodeBuffer.setLength(0);
+                calculatorMemoryValue += getCalculatorInputValue();
+                calculatorHasMemory = true;
+                updateCalculatorMemoryIndicator();
+                return;
+            case "M-":
+                calculatorPasscodeBuffer.setLength(0);
+                calculatorMemoryValue -= getCalculatorInputValue();
+                calculatorHasMemory = true;
+                updateCalculatorMemoryIndicator();
+                return;
+            case "+":
+            case "-":
+            case "×":
+            case "÷":
+                applyOperator(label);
+                return;
+            case "=":
+                performEquals();
+                return;
+            case ".":
+                appendDecimal();
+                return;
+            default:
+                appendDigit(label);
+        }
+    }
+
+    private void appendDigit(String digit) {
+        if ("Error".equals(calculatorInput)) {
+            calculatorInput = "0";
+        }
+        if (!calculatorInputInProgress || "0".equals(calculatorInput)) {
+            calculatorInput = digit;
+        } else if (calculatorInput.length() < 12) {
+            calculatorInput += digit;
+        }
+        calculatorInputInProgress = true;
+        if (calculatorPasscodeBuffer.length() == 4) {
+            calculatorPasscodeBuffer.setLength(0);
+        }
+        calculatorPasscodeBuffer.append(digit);
+        updateCalculatorDisplay();
+    }
+
+    private void appendDecimal() {
+        calculatorPasscodeBuffer.setLength(0);
+        if (!calculatorInputInProgress) {
+            calculatorInput = "0.";
+            calculatorInputInProgress = true;
+        } else if (!calculatorInput.contains(".")) {
+            calculatorInput += ".";
+        }
+        updateCalculatorDisplay();
+    }
+
+    private void applyOperator(String operator) {
+        calculatorPasscodeBuffer.setLength(0);
+        if ("Error".equals(calculatorInput)) {
+            calculatorInput = "0";
+        }
+        if (calculatorInputInProgress) {
+            double inputValue = getCalculatorInputValue();
+            if (calculatorStoredValue == null) {
+                calculatorStoredValue = inputValue;
+            } else if (calculatorPendingOp != null) {
+                Double result = calculate(calculatorStoredValue, inputValue, calculatorPendingOp);
+                if (result == null) {
+                    setCalculatorError();
+                    return;
+                }
+                calculatorStoredValue = result;
+                calculatorInput = formatCalculatorValue(result);
+            }
+        }
+        calculatorPendingOp = operator;
+        calculatorInputInProgress = false;
+        updateCalculatorDisplay();
+    }
+
+    private void performEquals() {
+        if (calculatorPendingOp == null && calculatorInputInProgress && calculatorPasscodeBuffer.length() == 4) {
+            String passcode = calculatorPasscodeBuffer.toString();
+            calculatorPasscodeBuffer.setLength(0);
+            processCalculatorPasscode(passcode);
+            return;
+        }
+        calculatorPasscodeBuffer.setLength(0);
+        if (calculatorPendingOp != null && calculatorInputInProgress) {
+            double inputValue = getCalculatorInputValue();
+            double baseValue = calculatorStoredValue != null ? calculatorStoredValue : 0;
+            Double result = calculate(baseValue, inputValue, calculatorPendingOp);
+            if (result == null) {
+                setCalculatorError();
+                return;
+            }
+            calculatorStoredValue = result;
+            calculatorInput = formatCalculatorValue(result);
+            calculatorPendingOp = null;
+            calculatorInputInProgress = false;
+            updateCalculatorDisplay();
+        }
+    }
+
+    private Double calculate(double left, double right, String operator) {
+        switch (operator) {
+            case "+":
+                return left + right;
+            case "-":
+                return left - right;
+            case "×":
+                return left * right;
+            case "÷":
+                if (right == 0) {
+                    return null;
+                }
+                return left / right;
+            default:
+                return null;
+        }
+    }
+
+    private void setCalculatorError() {
+        calculatorInput = "Error";
+        calculatorStoredValue = null;
+        calculatorPendingOp = null;
+        calculatorInputInProgress = false;
+        updateCalculatorDisplay();
+    }
+
+    private double getCalculatorInputValue() {
+        if ("Error".equals(calculatorInput) || calculatorInput.length() == 0) {
+            return 0;
+        }
+        try {
+            return Double.parseDouble(calculatorInput);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private String formatCalculatorValue(double value) {
+        if (Math.abs(value) < 1e-10) {
+            value = 0;
+        }
+        return calculatorFormat.format(value);
+    }
+
+    private void updateCalculatorDisplay() {
+        if (calculatorDisplay != null) {
+            calculatorDisplay.setText(calculatorInput);
+        }
+    }
+
+    private void updateCalculatorMemoryIndicator() {
+        if (calculatorMemoryIndicator != null) {
+            calculatorMemoryIndicator.setVisibility(calculatorHasMemory ? VISIBLE : INVISIBLE);
+        }
+    }
+
     private float shownT;
     protected void onAnimationUpdate(float open) {
 
@@ -1025,7 +1288,10 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
         if (num == 6) {
             return;
         }
-        AndroidUtilities.shakeViewSpring(numbersTitleContainer, shiftDp = -shiftDp);
+        View target = calculatorMode ? calculatorDisplayContainer : numbersTitleContainer;
+        if (target != null) {
+            AndroidUtilities.shakeViewSpring(target, shiftDp = -shiftDp);
+        }
     }
 
     private Runnable checkRunnable = new Runnable() {
@@ -1142,37 +1408,46 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
 
     private boolean pinShown = true;
     private ValueAnimator pinAnimator;
+    private FrameLayout getPinFrameLayout() {
+        return calculatorMode ? calculatorFrameLayout : numbersFrameLayout;
+    }
+
     private void showPin(boolean show) {
         if (pinAnimator != null) {
             pinAnimator.cancel();
         }
         pinShown = show;
-        pinAnimator = ValueAnimator.ofFloat(numbersFrameLayout.getAlpha(), show ? 1f : 0f);
+        FrameLayout pinFrameLayout = getPinFrameLayout();
+        pinAnimator = ValueAnimator.ofFloat(pinFrameLayout.getAlpha(), show ? 1f : 0f);
         pinAnimator.addUpdateListener(anm -> {
             final float t = (float) anm.getAnimatedValue();
-            numbersFrameLayout.setScaleX(AndroidUtilities.lerp(.8f, 1f, t));
-            numbersFrameLayout.setScaleY(AndroidUtilities.lerp(.8f, 1f, t));
-            numbersFrameLayout.setAlpha(AndroidUtilities.lerp(0f, 1f, t));
+            pinFrameLayout.setScaleX(AndroidUtilities.lerp(.8f, 1f, t));
+            pinFrameLayout.setScaleY(AndroidUtilities.lerp(.8f, 1f, t));
+            pinFrameLayout.setAlpha(AndroidUtilities.lerp(0f, 1f, t));
 
-            passcodeTextView.setScaleX(AndroidUtilities.lerp(1f, .9f, t));
-            passcodeTextView.setScaleY(AndroidUtilities.lerp(1f, .9f, t));
-            passcodeTextView.setAlpha(AndroidUtilities.lerp(1f, 0f, t));
-
-            passwordEditText2.setAlpha(AndroidUtilities.lerp(0f, 1f, t));
-        });
-        pinAnimator.addListener(new AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(Animator animation) {
-                final float t = show ? 1f : 0f;
-                numbersFrameLayout.setScaleX(AndroidUtilities.lerp(.8f, 1f, t));
-                numbersFrameLayout.setScaleY(AndroidUtilities.lerp(.8f, 1f, t));
-                numbersFrameLayout.setAlpha(AndroidUtilities.lerp(0f, 1f, t));
-
+            if (!calculatorMode) {
                 passcodeTextView.setScaleX(AndroidUtilities.lerp(1f, .9f, t));
                 passcodeTextView.setScaleY(AndroidUtilities.lerp(1f, .9f, t));
                 passcodeTextView.setAlpha(AndroidUtilities.lerp(1f, 0f, t));
 
                 passwordEditText2.setAlpha(AndroidUtilities.lerp(0f, 1f, t));
+            }
+        });
+        pinAnimator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                final float t = show ? 1f : 0f;
+                pinFrameLayout.setScaleX(AndroidUtilities.lerp(.8f, 1f, t));
+                pinFrameLayout.setScaleY(AndroidUtilities.lerp(.8f, 1f, t));
+                pinFrameLayout.setAlpha(AndroidUtilities.lerp(0f, 1f, t));
+
+                if (!calculatorMode) {
+                    passcodeTextView.setScaleX(AndroidUtilities.lerp(1f, .9f, t));
+                    passcodeTextView.setScaleY(AndroidUtilities.lerp(1f, .9f, t));
+                    passcodeTextView.setAlpha(AndroidUtilities.lerp(1f, 0f, t));
+
+                    passwordEditText2.setAlpha(AndroidUtilities.lerp(0f, 1f, t));
+                }
             }
         });
         pinAnimator.setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT);
@@ -1240,6 +1515,11 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
     }
 
     private void checkFingerprintButton() {
+        if (calculatorMode) {
+            fingerprintView.setVisibility(GONE);
+            fingerprintImage.setVisibility(GONE);
+            return;
+        }
         boolean hasFingerprint = false;
         Activity parentActivity = AndroidUtilities.findActivity(getContext());
         if (Build.VERSION.SDK_INT >= 23 && parentActivity != null && SharedConfig.useFingerprintLock) {
@@ -1265,6 +1545,10 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
     }
 
     public void onShow(boolean fingerprint, boolean animated, int x, int y, Runnable onShow, Runnable onStart) {
+        calculatorMode = SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PIN;
+        if (calculatorMode) {
+            resetCalculatorState();
+        }
         checkFingerprintButton();
         checkRetryTextView();
         Activity parentActivity = AndroidUtilities.findActivity(getContext());
@@ -1341,16 +1625,24 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
 
         if (SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PIN) {
             if (retryTextView.getVisibility() != VISIBLE) {
-                numbersFrameLayout.setVisibility(VISIBLE);
+                calculatorFrameLayout.setVisibility(calculatorMode ? VISIBLE : GONE);
+                numbersFrameLayout.setVisibility(calculatorMode ? GONE : VISIBLE);
             }
             passwordEditText.setVisibility(GONE);
-            passwordEditText2.setVisibility(VISIBLE);
+            passwordEditText2.setVisibility(calculatorMode ? GONE : VISIBLE);
+            passcodeTextView.setVisibility(calculatorMode ? GONE : VISIBLE);
+            numbersTitleContainer.setVisibility(calculatorMode ? GONE : VISIBLE);
             checkImage.setVisibility(GONE);
             fingerprintImage.setVisibility(GONE);
+            imageView.setVisibility(calculatorMode ? GONE : VISIBLE);
         } else if (SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PASSWORD) {
             passwordEditText.setFilters(new InputFilter[0]);
             passwordEditText.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
             numbersFrameLayout.setVisibility(GONE);
+            calculatorFrameLayout.setVisibility(GONE);
+            imageView.setVisibility(VISIBLE);
+            passcodeTextView.setVisibility(VISIBLE);
+            numbersTitleContainer.setVisibility(VISIBLE);
             passwordEditText.setFocusable(true);
             passwordEditText.setFocusableInTouchMode(true);
             passwordEditText.setVisibility(VISIBLE);
@@ -1359,6 +1651,9 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
             fingerprintImage.setVisibility(fingerprintView.getVisibility());
         }
         setVisibility(VISIBLE);
+        if (calculatorMode) {
+            requestLayout();
+        }
         passwordEditText.setTransformationMethod(PasswordTransformationMethod.getInstance());
         passwordEditText.setText("");
         passwordEditText2.eraseAllCharacters(false);
@@ -1391,8 +1686,9 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
 
                         innerAnimators.clear();
 
-                        for (int a = 0, N = numbersFrameLayout.getChildCount(); a < N; a++) {
-                            View child = numbersFrameLayout.getChildAt(a);
+                        FrameLayout pinFrameLayout = getPinFrameLayout();
+                        for (int a = 0, N = pinFrameLayout.getChildCount(); a < N; a++) {
+                            View child = pinFrameLayout.getChildAt(a);
 //                            if (!(child instanceof TextView || child instanceof ImageView)) {
 //                                continue;
 //                            }
@@ -1536,6 +1832,8 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
         int sizeBetweenNumbersX = dp(BUTTON_X_MARGIN);
         int sizeBetweenNumbersY = dp(BUTTON_Y_MARGIN);
         int buttonSize = dp(BUTTON_SIZE);
+        int calculatorHeaderHeight = dp(70);
+        FrameLayout pinFrameLayout = getPinFrameLayout();
 
         final boolean landscape = !AndroidUtilities.isTablet() && getContext().getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
 
@@ -1551,6 +1849,11 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
             layoutParams.height = dp(180);
             layoutParams.topMargin = (height - dp(140)) / 2 + (SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PIN ? dp(40) : 0);
             passwordFrameLayout.setLayoutParams(layoutParams);
+            if (calculatorMode && SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PIN) {
+                layoutParams.height = 0;
+                layoutParams.topMargin = 0;
+                passwordFrameLayout.setLayoutParams(layoutParams);
+            }
 
             layoutParams = (LayoutParams) numbersContainer.getLayoutParams();
             layoutParams.height = height;
@@ -1561,11 +1864,18 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
 
             int cols = 3;
             int rows = 4;
-            layoutParams = (LayoutParams) numbersFrameLayout.getLayoutParams();
-            layoutParams.height = dp(82) + buttonSize * rows + sizeBetweenNumbersY * Math.max(0, rows - 1);
-            layoutParams.width =  buttonSize * cols + sizeBetweenNumbersX * Math.max(0, cols - 1);
+            layoutParams = (LayoutParams) pinFrameLayout.getLayoutParams();
+            if (calculatorMode) {
+                cols = 4;
+                rows = 5;
+                layoutParams.height = calculatorHeaderHeight + buttonSize * rows + sizeBetweenNumbersY * Math.max(0, rows - 1);
+                layoutParams.width = buttonSize * cols + sizeBetweenNumbersX * Math.max(0, cols - 1);
+            } else {
+                layoutParams.height = dp(82) + buttonSize * rows + sizeBetweenNumbersY * Math.max(0, rows - 1);
+                layoutParams.width = buttonSize * cols + sizeBetweenNumbersX * Math.max(0, cols - 1);
+            }
             layoutParams.gravity = Gravity.CENTER;
-            numbersFrameLayout.setLayoutParams(layoutParams);
+            pinFrameLayout.setLayoutParams(layoutParams);
         } else {
             imageView.setTranslationX(width / 2f - dp(29));
 
@@ -1588,19 +1898,30 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
             layoutParams.leftMargin = left;
             passwordFrameLayout.setTag(top);
             passwordFrameLayout.setLayoutParams(layoutParams);
+            if (calculatorMode && SharedConfig.passcodeType == SharedConfig.PASSCODE_TYPE_PIN) {
+                layoutParams.height = 0;
+                passwordFrameLayout.setLayoutParams(layoutParams);
+            }
             int passwordTop = layoutParams.topMargin + layoutParams.height;
 
             int cols = 3;
             int rows = 4;
-            layoutParams = (LayoutParams) numbersFrameLayout.getLayoutParams();
-            layoutParams.height = dp(82) + buttonSize * rows + sizeBetweenNumbersY * Math.max(0, rows - 1);
-            layoutParams.width =  buttonSize * cols + sizeBetweenNumbersX * Math.max(0, cols - 1);
+            layoutParams = (LayoutParams) pinFrameLayout.getLayoutParams();
+            if (calculatorMode) {
+                cols = 4;
+                rows = 5;
+                layoutParams.height = calculatorHeaderHeight + buttonSize * rows + sizeBetweenNumbersY * Math.max(0, rows - 1);
+                layoutParams.width = buttonSize * cols + sizeBetweenNumbersX * Math.max(0, cols - 1);
+            } else {
+                layoutParams.height = dp(82) + buttonSize * rows + sizeBetweenNumbersY * Math.max(0, rows - 1);
+                layoutParams.width =  buttonSize * cols + sizeBetweenNumbersX * Math.max(0, cols - 1);
+            }
             if (AndroidUtilities.isTablet()) {
                 layoutParams.gravity = Gravity.CENTER;
             } else {
                 layoutParams.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
             }
-            numbersFrameLayout.setLayoutParams(layoutParams);
+            pinFrameLayout.setLayoutParams(layoutParams);
 
             int buttonHeight = height - layoutParams.height;
             layoutParams = (LayoutParams) numbersContainer.getLayoutParams();
@@ -1616,25 +1937,42 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
         }
 
         int headerMargin = dp(landscape ? 52 : 82);
-        for (int a = 0; a < 12; a++) {
-            LayoutParams layoutParams1;
-            int num;
-            if (a == 0) {
-                num = 10;
-            } else if (a == 10) {
-                num = 11;
-            } else if (a == 11) {
-                num = 9;
-            } else {
-                num = a - 1;
+        if (calculatorMode) {
+            LayoutParams displayParams = (LayoutParams) calculatorDisplayContainer.getLayoutParams();
+            displayParams.height = calculatorHeaderHeight;
+            calculatorDisplayContainer.setLayoutParams(displayParams);
+
+            int cols = 4;
+            for (int i = 0; i < calculatorButtons.size(); i++) {
+                int row = i / cols;
+                int col = i % cols;
+                CalculatorButton button = calculatorButtons.get(i);
+                LayoutParams buttonParams = (LayoutParams) button.getLayoutParams();
+                buttonParams.topMargin = calculatorHeaderHeight + (buttonSize + sizeBetweenNumbersY) * row;
+                buttonParams.leftMargin = (buttonSize + sizeBetweenNumbersX) * col;
+                button.setLayoutParams(buttonParams);
             }
-            int row = num / 3;
-            int col = num % 3;
-            FrameLayout frameLayout = numberFrameLayouts.get(a);
-            layoutParams1 = (LayoutParams) frameLayout.getLayoutParams();
-            layoutParams1.topMargin = headerMargin + (buttonSize + sizeBetweenNumbersY) * row;
-            layoutParams1.leftMargin = (buttonSize + sizeBetweenNumbersX) * col;
-            frameLayout.setLayoutParams(layoutParams1);
+        } else {
+            for (int a = 0; a < 12; a++) {
+                LayoutParams layoutParams1;
+                int num;
+                if (a == 0) {
+                    num = 10;
+                } else if (a == 10) {
+                    num = 11;
+                } else if (a == 11) {
+                    num = 9;
+                } else {
+                    num = a - 1;
+                }
+                int row = num / 3;
+                int col = num % 3;
+                FrameLayout frameLayout = numberFrameLayouts.get(a);
+                layoutParams1 = (LayoutParams) frameLayout.getLayoutParams();
+                layoutParams1.topMargin = headerMargin + (buttonSize + sizeBetweenNumbersY) * row;
+                layoutParams1.leftMargin = (buttonSize + sizeBetweenNumbersX) * col;
+                frameLayout.setLayoutParams(layoutParams1);
+            }
         }
 
         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
@@ -1959,6 +2297,33 @@ public class PasscodeView extends FrameLayout implements NotificationCenter.Noti
                 case 9: return "WXYZ";
             }
             return "";
+        }
+
+        @Override
+        public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(info);
+            info.setClassName("android.widget.Button");
+        }
+    }
+
+    public static class CalculatorButton extends FrameLayout {
+
+        private final TextView textView;
+
+        public CalculatorButton(@NonNull Context context) {
+            super(context);
+
+            setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(30), 0x26ffffff, 0x4cffffff));
+            textView = new TextView(context);
+            textView.setTypeface(AndroidUtilities.bold());
+            textView.setTextColor(0xffffffff);
+            textView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 22);
+            textView.setGravity(Gravity.CENTER);
+            addView(textView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.CENTER));
+        }
+
+        public void setText(String text) {
+            textView.setText(text);
         }
 
         @Override
